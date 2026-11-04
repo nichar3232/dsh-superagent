@@ -176,6 +176,22 @@ it('answers a person with no ticket, needs the reply, and refuses a silent ignor
   expect(await route({ kind: 'ignore', trigger_id: direct.id, reason: 'chat' })).toMatchObject({ refused: 'A direct message gets an answer: use kind answer with reply' })
 })
 
+it('takes the Router\'s text as the answer only when one direct chat message waits, and never makes a ticket', async () => {
+  const chat = (id: string) => ({ ...feishu(id, 'hello'), source: 'telegram', addressed: 'direct' as const, id: `t${id}` })
+  const decide = vi.spyOn(h.runtime.engine, 'decide').mockImplementation(() => ({ kind: 'ignore' }) as never)
+  const reply = vi.spyOn(h.runtime.engine, 'reply').mockImplementation(() => ({}) as never)
+  const threads = (ids: string[]) => ids.map(id => ({ evaluating: { delivered: 'now', triggerIds: [id] } }))
+  const active = vi.spyOn(h.runtime.store.threads, 'active').mockReturnValue(threads(['t1']) as never)
+  vi.spyOn(h.runtime.store.triggers, 'get').mockImplementation(id => chat(String(id).slice(1)))
+  h.runtime.routerSpoke('Hello.')
+  expect(decide).toHaveBeenCalledWith('t1', { kind: 'ignore', reason: 'answered' })
+  expect(reply).toHaveBeenCalledWith({ purpose: 'answer', text: 'Hello.', triggerId: 't1' })
+  decide.mockClear(); reply.mockClear()
+  active.mockReturnValue(threads(['t1', 't2']) as never)
+  h.runtime.routerSpoke('Which one?')
+  expect(decide).not.toHaveBeenCalled(); expect(reply).not.toHaveBeenCalled()
+})
+
 it('refuses alone an item that lacks a field its kind needs or breaks a field\'s limit, naming the field, and ignores unused fields', async () => {
   const triggers = ['2', '3', '4', '5', '6'].map(id => feishu(id, `@bot 请求 ${id}`))
   for (const trigger of triggers) h.runtime.receive(trigger)

@@ -121,6 +121,7 @@ export class Runtime extends Service implements SourceHost {
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
+        routerSpoke: text => { this.routerSpoke(text) },
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
@@ -195,6 +196,24 @@ export class Runtime extends Service implements SourceHost {
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
+  /**
+   * The local model often writes its answer rather than calling the route tool, and that text would reach nobody. When exactly one
+   * direct chat message waits on the main Session, the text is its answer. This can only reply: it never makes a Ticket, and with
+   * several waiting it does nothing, since a wrong pairing is worse than the Eval's retry.
+   */
+  routerSpoke(text: string): void {
+    const waiting = this.store.threads.active().flatMap(thread => {
+      const evaluation = thread.evaluating
+      const id = evaluation?.delivered ? evaluation.triggerIds[0] : undefined
+      const trigger = id ? this.store.triggers.get(id) : undefined
+      return trigger?.human && trigger.addressed === 'direct' && (trigger.source === 'telegram' || trigger.source === 'local') ? [trigger] : []
+    })
+    if (waiting.length !== 1) return
+    const trigger = waiting[0]!
+    this.engine.decide(trigger.id, { kind: 'ignore', reason: 'answered' })
+    this.engine.reply({ purpose: 'answer', text, triggerId: trigger.id })
+    void this.sendReplies()
+  }
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }

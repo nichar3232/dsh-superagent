@@ -34,6 +34,8 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
+  /** The main Session ended a turn on `text` instead of a tool call. */
+  routerSpoke?(text: string): void
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
   tools(agent: Agent, ticket?: Ticket): Tool[]
 }
@@ -117,6 +119,13 @@ export class Sessions {
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
+      if (agent.id === this.host.masterId && event.type === 'turn/end') {
+        const last = session.snapshotEvents().filter(item => item.type === 'assistant/message').at(-1)
+        const blocks = last?.type === 'assistant/message' ? last.data.message.content : []
+        const text = blocks.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
+        // A last step that called a tool has no text for a person.
+        if (text && !blocks.some(block => block.type === 'tool-call')) this.host.routerSpoke?.(text)
+      }
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
