@@ -45,7 +45,7 @@ const fromDecision = (decision: Decision) => ({ decision: decision.kind, reason:
  * runs (`FIELDS`), so an item that lacks one, or whose value breaks a limit, is refused alone.
  */
 const RouteItemSchema = z.object({
-  kind: z.enum(['accept', 'attach', 'ignore', 'stop']),
+  kind: z.enum(['answer', 'accept', 'attach', 'ignore', 'stop']),
   trigger_id: z.string().describe('The candidate card\'s trigger_id; deciding it decides its batch.'),
   ticket_id: z.string().nullish().describe('attach and stop: the ticket.'),
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
@@ -53,10 +53,16 @@ const RouteItemSchema = z.object({
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
+  reply: z.string().nullish().describe('answer: the text the person reads, sent at once. No ticket is made.'),
 }).strict()
 type RouteItem = z.infer<typeof RouteItemSchema>
 type Kind = RouteItem['kind']
 type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id'>
+/** The chat Sources, whose direct messages always get an answer. */
+const CHAT_SOURCES = new Set(['telegram', 'local'])
+/** The tools a chat Router needs; the rest cost it prompt on every model call. */
+const LEAN_TOOLS = new Set(['orchestrator_read', 'orchestrator_route', 'orchestrator_reply', 'orchestrator_ticket_retry',
+  'orchestrator_ticket_request_status', 'orchestrator_ticket_note'])
 /** Each field's check, the kinds whose items read it and those that need it; an item of another kind leaves it unread. */
 const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: readonly Kind[] }> = {
   ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
@@ -65,6 +71,7 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
+  reply: { check: z.string().max(20000), reads: ['answer'], needs: ['answer'] },
 }
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
 function invalid(item: RouteItem): string | undefined {
@@ -90,7 +97,7 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
   // A Trigger an earlier item decided went with that item's Decision, also as a member of its batch.
   // A stop of it for another ticket is the Engine's to judge.
   const earlier = decided.get(item.trigger_id)
-  if (earlier && item.kind === 'ignore') return { refused: `Decided in this call with ${earlier}, whose Decision took its batch` }
+  if (earlier && (item.kind === 'ignore' || item.kind === 'answer')) return { refused: `Decided in this call with ${earlier}, whose Decision took its batch` }
   switch (item.kind) {
     case 'accept': {
       const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
@@ -112,7 +119,17 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
       const decision = host.engine.decide(item.trigger_id, { kind: 'stop', ticketId: item.ticket_id!, reason: item.reason || { code: 'humanStop' } })
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
+    // Answering a person takes no ticket: the Decision is an ignore, and the reply is what they read.
+    case 'answer': {
+      const decision = host.engine.decide(item.trigger_id, { kind: 'ignore', reason: 'answered' })
+      host.engine.reply({ purpose: 'answer', text: item.reply!, triggerId: item.trigger_id })
+      void host.sendReplies()
+      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
+    }
     case 'ignore': {
+      // A person's direct message gets an answer: the model cannot end the exchange in silence.
+      const trigger = host.store.triggers.get(item.trigger_id)
+      if (trigger?.addressed === 'direct' && trigger.human && CHAT_SOURCES.has(trigger.source)) return { refused: 'A direct message gets an answer: use kind answer with reply' }
       const decision = host.engine.decide(item.trigger_id, { kind: 'ignore', reason: item.reason! })
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
@@ -125,7 +142,7 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
 function routeTool(host: MainToolsHost): Tool {
   return tool({
     name: 'orchestrator_route',
-    description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
+    description: 'Route candidates, one item each by the card\'s trigger_id, in one call: answer a person directly with reply (no ticket), accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
     schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
     execute: async ({ decisions }) => {
       const decided = new Map<string, string>()
@@ -153,6 +170,10 @@ function routeTool(host: MainToolsHost): Tool {
 }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+  const tools = allMainTools(host, agent)
+  return process.env.DSH_SUPERAGENT_FULL_ROUTER === '1' ? tools : tools.filter(item => LEAN_TOOLS.has(item.name))
+}
+function allMainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',

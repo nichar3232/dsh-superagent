@@ -10,6 +10,9 @@
     - id: dsh-superagent-feishu
       name: dsh-superagent/feishu-watch
       disabled: true
+    # Telegram and local chat Sources; their defaults receive nothing until `listen` is switched on.
+    - id: dsh-superagent-chat
+      name: dsh-superagent/chat-watch
     # The agent preset of every Executor Session (WORKER_PRESET in src/app/sessions.ts); the main Session has its own, below.
     # It is DSH's `standard` preset with only what a worker needs, and a shell whose foreground command moves to a background job
     # after 5 seconds, so a long command does not hold back a person's message, which the Session takes at its next step. Left
@@ -127,7 +130,7 @@
       config:
         id: dsh-superagent-router
         name: dsh-superagent 主 Session
-        description: dsh-superagent 的主 Session 专用，不供手动选择。前台命令和任务等待超 5 秒转入后台，只含路由所需的工具。
+        description: dsh-superagent 的主 Session 专用，不供手动选择。只含路由所需的工具，没有 shell。
         order: 91
         plugins:
           - id: agent-instructions
@@ -136,44 +139,6 @@
               maxBytes: 65536
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
-          - id: shell
-            name: cordis:group
-            group: true
-            isolate:
-              shell: true
-            config:
-              - id: bash-sandbox
-                name: '@deepseek-ai/dsh-bash-sandbox'
-                disabled: !!js process.platform === 'win32'
-                config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
-              - id: pwsh-sandbox
-                name: '@deepseek-ai/dsh-pwsh-sandbox'
-                disabled: !!js process.platform !== 'win32'
-                config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
-              - id: tool-bash
-                name: '@deepseek-ai/dsh-tool-bash'
-                disabled: !!js process.platform === 'win32'
-              - id: tool-pwsh
-                name: '@deepseek-ai/dsh-tool-pwsh'
-                disabled: !!js process.platform !== 'win32'
-          - id: tool-fs
-            name: '@deepseek-ai/dsh-tool-fs'
-            config:
-              write: false
-              edit: false
-          - id: tool-jobs
-            name: '@deepseek-ai/dsh-tool-jobs'
-            config:
-              waitTimeoutMs: 5000
-              maxWaitTimeoutMs: 5000
-          - id: skill-filesystem
-            name: '@deepseek-ai/dsh-skill-filesystem'
-          - id: tool-skill
-            name: '@deepseek-ai/dsh-tool-skill'
           - id: compaction
             name: cordis:group
             group: true

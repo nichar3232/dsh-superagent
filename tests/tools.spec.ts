@@ -163,6 +163,19 @@ it('routes several triggers in one call, in order, and answers a refused or fail
   expect(h.runtime.store.tickets.list()).toHaveLength(2)
 })
 
+it('answers a person with no ticket, needs the reply, and refuses a silent ignore of a direct chat message', async () => {
+  const question = feishu('21', '@bot 你是谁')
+  h.runtime.receive(question)
+  await h.runtime.idle()
+  const route = async (item: Record<string, unknown>) => ((await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [item] })) as { results: Record<string, unknown>[] }).results[0]
+  expect(await route({ kind: 'answer', trigger_id: question.id })).toEqual({ trigger_id: question.id, kind: 'answer', refused: 'answer needs reply' })
+  expect(await route({ kind: 'answer', trigger_id: question.id, reply: 'Alexander.' })).toMatchObject({ kind: 'answer', decision: 'ignore' })
+  expect(h.runtime.store.tickets.list()).toHaveLength(0)
+  const direct = { ...feishu('22', 'hello'), source: 'telegram', addressed: 'direct' as const }
+  vi.spyOn(h.runtime.store.triggers, 'get').mockReturnValue(direct)
+  expect(await route({ kind: 'ignore', trigger_id: direct.id, reason: 'chat' })).toMatchObject({ refused: 'A direct message gets an answer: use kind answer with reply' })
+})
+
 it('refuses alone an item that lacks a field its kind needs or breaks a field\'s limit, naming the field, and ignores unused fields', async () => {
   const triggers = ['2', '3', '4', '5', '6'].map(id => feishu(id, `@bot 请求 ${id}`))
   for (const trigger of triggers) h.runtime.receive(trigger)
