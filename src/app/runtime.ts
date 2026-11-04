@@ -195,13 +195,15 @@ export class Runtime extends Service implements SourceHost {
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
+  /** Triggers the main Session was already told to route. */
+  private readonly nudged = new Set<string>()
   sendReplies(): Promise<void> { return this.outbox.sent() }
   /**
-   * The local model often writes its answer rather than calling the route tool, and that text would reach nobody. When exactly one
-   * direct chat message waits on the main Session, the text is its answer. This can only reply: it never makes a Ticket, and with
-   * several waiting it does nothing, since a wrong pairing is worse than the Eval's retry.
+   * The local model often writes text instead of calling the route tool, and that text reaches nobody. It must not go out as an answer:
+   * "I'll check that now" with no ticket behind it would be a false promise. So the main Session is told once to route; if it writes text
+   * again, the person gets an honest line that promises nothing. With several messages waiting, the Eval's own retry handles them.
    */
-  routerSpoke(text: string): void {
+  routerSpoke(_text: string): void {
     const waiting = this.store.threads.active().flatMap(thread => {
       const evaluation = thread.evaluating
       const id = evaluation?.delivered ? evaluation.triggerIds[0] : undefined
@@ -210,8 +212,13 @@ export class Runtime extends Service implements SourceHost {
     })
     if (waiting.length !== 1) return
     const trigger = waiting[0]!
-    this.engine.decide(trigger.id, { kind: 'ignore', reason: 'answered' })
-    this.engine.reply({ purpose: 'answer', text, triggerId: trigger.id })
+    if (!this.nudged.has(trigger.id)) {
+      this.nudged.add(trigger.id)
+      this.sessions.relay(key('route-nudge', trigger.id), `Your text reached nobody. Call orchestrator_route now for trigger_id ${trigger.id}: kind answer with reply, or kind accept.`)
+      return
+    }
+    this.engine.decide(trigger.id, { kind: 'ignore', reason: 'unrouted' })
+    this.engine.reply({ purpose: 'answer', text: 'I could not route that. Send it again.', triggerId: trigger.id })
     void this.sendReplies()
   }
   private closing(): boolean { return this.closingFlag }

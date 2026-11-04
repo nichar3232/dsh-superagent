@@ -116,6 +116,10 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
     }
     // Through `engine.decide`, so only a person's message the gate admits with explicit strength stops a ticket.
     case 'stop': {
+      // The message that made a ticket cannot also stop it: the model did that for "pause X", then said it was done.
+      const ticket = host.store.tickets.get(item.ticket_id!)
+      const origin = ticket?.decisionId ? host.store.decisions.get(ticket.decisionId) : undefined
+      if (origin?.triggerIds.includes(item.trigger_id)) return { refused: 'This message started that ticket: leave it to its worker' }
       const decision = host.engine.decide(item.trigger_id, { kind: 'stop', ticketId: item.ticket_id!, reason: item.reason || { code: 'humanStop' } })
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }

@@ -60,7 +60,7 @@ export interface ExecutorHost {
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
-  readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
+  readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'requestStatus' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
@@ -216,6 +216,8 @@ export class DshExecutor implements Executor {
    * runs again or its Assignment ends.
    */
   private readonly settling = new Map<string, AbortController>()
+  /** Tickets whose worker was already asked to report after a turn that ended without one. */
+  private readonly reportAsked = new Set<string>()
   /** The stops of tickets' background work that run, by ticket, which a launch or a delivery of the ticket waits for. */
   private readonly stopping = new Map<string, Promise<void>>()
   /** The jobs workers left to a person when they handed off, by ticket, and the collecting of their ends. */
@@ -640,6 +642,11 @@ export class DshExecutor implements Executor {
     const current = live()
     if (this.host.closing() || look.signal.aborted || (!quiet && !limit.signal.aborted) || !current || this.resuming.has(idle.id)) return
     if (quiet) this.host.engine.turnEnded(ticket.id, idle.id)
+    // A local model often ends on text with no report, which reaches nobody: ask it once to report.
+    if (quiet && process.env.DSH_SUPERAGENT_FULL_ROUTER !== '1' && !this.reportAsked.has(ticket.id)) {
+      this.reportAsked.add(ticket.id)
+      this.host.engine.requestStatus(ticket.id)
+    }
     let stopped = ''
     if (!quiet) {
       // Its shell jobs that ran past the limit are killed, which it is told at its next turn; its subagents, whose stop would

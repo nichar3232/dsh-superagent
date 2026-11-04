@@ -176,20 +176,33 @@ it('answers a person with no ticket, needs the reply, and refuses a silent ignor
   expect(await route({ kind: 'ignore', trigger_id: direct.id, reason: 'chat' })).toMatchObject({ refused: 'A direct message gets an answer: use kind answer with reply' })
 })
 
-it('takes the Router\'s text as the answer only when one direct chat message waits, and never makes a ticket', async () => {
+it('never sends the Router\'s text as an answer: it asks once to route, then says plainly it could not', async () => {
   const chat = (id: string) => ({ ...feishu(id, 'hello'), source: 'telegram', addressed: 'direct' as const, id: `t${id}` })
   const decide = vi.spyOn(h.runtime.engine, 'decide').mockImplementation(() => ({ kind: 'ignore' }) as never)
   const reply = vi.spyOn(h.runtime.engine, 'reply').mockImplementation(() => ({}) as never)
+  const relay = vi.spyOn(h.runtime.sessions, 'relay').mockImplementation(() => {})
   const threads = (ids: string[]) => ids.map(id => ({ evaluating: { delivered: 'now', triggerIds: [id] } }))
   const active = vi.spyOn(h.runtime.store.threads, 'active').mockReturnValue(threads(['t1']) as never)
   vi.spyOn(h.runtime.store.triggers, 'get').mockImplementation(id => chat(String(id).slice(1)))
-  h.runtime.routerSpoke('Hello.')
-  expect(decide).toHaveBeenCalledWith('t1', { kind: 'ignore', reason: 'answered' })
-  expect(reply).toHaveBeenCalledWith({ purpose: 'answer', text: 'Hello.', triggerId: 't1' })
-  decide.mockClear(); reply.mockClear()
-  active.mockReturnValue(threads(['t1', 't2']) as never)
+  h.runtime.routerSpoke('I will check that now.')
+  expect(relay).toHaveBeenCalledTimes(1)
+  expect(reply).not.toHaveBeenCalled()
+  h.runtime.routerSpoke('I will check that now.')
+  expect(reply).toHaveBeenCalledWith({ purpose: 'answer', text: 'I could not route that. Send it again.', triggerId: 't1' })
+  decide.mockClear(); reply.mockClear(); relay.mockClear()
+  active.mockReturnValue(threads(['t2', 't3']) as never)
   h.runtime.routerSpoke('Which one?')
-  expect(decide).not.toHaveBeenCalled(); expect(reply).not.toHaveBeenCalled()
+  expect(decide).not.toHaveBeenCalled(); expect(reply).not.toHaveBeenCalled(); expect(relay).not.toHaveBeenCalled()
+})
+
+it('refuses to stop a ticket with the message that started it', async () => {
+  const request = feishu('31', '@bot pause it')
+  h.runtime.receive(request)
+  await h.runtime.idle()
+  const route = async (item: Record<string, unknown>) => ((await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [item] })) as { results: Record<string, unknown>[] }).results[0]
+  const accepted = await route({ kind: 'accept', trigger_id: request.id, title: 'Pause', worktree_name: 'pause-it', acknowledgement: 'Pausing.' })
+  const ticket = (accepted!.ticket as { ticket_id: string }).ticket_id
+  expect(await route({ kind: 'stop', trigger_id: request.id, ticket_id: ticket, reason: 'done' })).toMatchObject({ refused: 'This message started that ticket: leave it to its worker' })
 })
 
 it('refuses alone an item that lacks a field its kind needs or breaks a field\'s limit, naming the field, and ignores unused fields', async () => {
